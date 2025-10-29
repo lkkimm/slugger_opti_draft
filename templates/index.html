@@ -7,8 +7,8 @@
       body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
       .row { display: flex; gap: 24px; align-items: flex-start; }
       .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
-      .controls { min-width: 320px; }
-      .chart { max-width: 660px; }
+      .controls { min-width: 340px; }
+      .chart { max-width: 680px; }
       label { display: block; margin: 8px 0 4px; font-weight: 600; }
       button { padding: 8px 12px; border-radius: 6px; border: 1px solid #aaa; background: #f7f7f7; cursor: pointer; }
       input, select { width: 100%; padding: 6px; }
@@ -18,28 +18,90 @@
     <h1>Spray Chart Optimizer</h1>
     <div class="row">
       <div class="card controls">
-        <form method="GET" action="/chart" target="chartframe">
-          <label>Player IDs (comma-separated)</label>
-          <input name="players" placeholder="e.g. 123,456">
+        <form id="controls">
           <label>Handedness</label>
-          <select name="hand">
+          <select id="hand" name="hand">
             <option value="">(any)</option>
             <option value="L">L</option>
             <option value="R">R</option>
           </select>
+
           <label>Start date</label>
-          <input type="date" name="start" value="{{default_start}}">
+          <input type="date" id="start" name="start" value="{{default_start}}">
           <label>End date</label>
-          <input type="date" name="end" value="{{default_end}}">
+          <input type="date" id="end" name="end" value="{{default_end}}">
+
+          <label style="margin-top:12px;">Players</label>
+          <select id="players" name="players" multiple size="12" style="width:100%;"></select>
+
           <div style="margin-top: 10px;">
             <button type="submit">Generate Spray Chart</button>
           </div>
+          <p style="font-size: 12px; color: #666;">JSON: <code>/api/players</code>, <code>/api/compute</code></p>
         </form>
-        <p style="font-size: 12px; color: #666;">JSON API: <code>/api/compute</code> with same query params.</p>
       </div>
+
       <div class="card chart">
-        <iframe name="chartframe" style="width:640px; height:640px; border:0;"></iframe>
+        <div id="summary" style="margin-bottom:8px; font-size:14px;"></div>
+        <iframe id="chartframe" name="chartframe" style="width:640px; height:640px; border:0;"></iframe>
       </div>
     </div>
+
+    <script>
+      async function loadPlayers() {
+        const hand = document.getElementById('hand').value;
+        const start = document.getElementById('start').value;
+        const end = document.getElementById('end').value;
+        const url = `/api/players?hand=${encodeURIComponent(hand)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const sel = document.getElementById('players');
+        sel.innerHTML = "";
+        (data.players || []).forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.player_id;
+          opt.textContent = `${p.player} (${p.handedness || "-"})`;
+          sel.appendChild(opt);
+        });
+      }
+
+      function selectedIds() {
+        const sel = document.getElementById('players');
+        return Array.from(sel.selectedOptions).map(o => o.value).join(',');
+      }
+
+      document.getElementById('hand').addEventListener('change', loadPlayers);
+      document.getElementById('start').addEventListener('change', loadPlayers);
+      document.getElementById('end').addEventListener('change', loadPlayers);
+      window.addEventListener('load', loadPlayers);
+
+      document.getElementById('controls').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const ids = selectedIds();
+        const hand = document.getElementById('hand').value;
+        const start = document.getElementById('start').value;
+        const end = document.getElementById('end').value;
+
+        // 1) Show PNG chart
+        const chartUrl = `/chart?players=${encodeURIComponent(ids)}&hand=${encodeURIComponent(hand)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+        document.getElementById('chartframe').src = chartUrl;
+
+        // 2) Fetch JSON summary for numbers
+        const res = await fetch(`/api/compute?players=${encodeURIComponent(ids)}&hand=${encodeURIComponent(hand)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+        const data = await res.json();
+
+        const pct = (data.summary.catch_rate * 100).toFixed(1);
+        const fmt = (n) => (n===null||n===undefined||Number.isNaN(n) ? "-" : Number(n).toFixed(1));
+        document.getElementById('summary').innerHTML = `
+          <div><b>Catch rate:</b> ${pct}% (${data.summary.caught_total} / ${data.summary.balls_total})</div>
+          <div style="margin-top:6px;">
+            <b>LF:</b> x=${fmt(data.LF?.x_m)} m, y=${fmt(data.LF?.y_m)} m, caught=${data.LF?.caught||0}/${data.LF?.total||0} &nbsp; |
+            <b>CF:</b> x=${fmt(data.CF?.x_m)} m, y=${fmt(data.CF?.y_m)} m, caught=${data.CF?.caught||0}/${data.CF?.total||0} &nbsp; |
+            <b>RF:</b> x=${fmt(data.RF?.x_m)} m, y=${fmt(data.RF?.y_m)} m, caught=${data.RF?.caught||0}/${data.RF?.total||0}
+          </div>
+        `;
+      });
+    </script>
   </body>
 </html>

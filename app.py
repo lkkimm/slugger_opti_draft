@@ -101,44 +101,43 @@ from flask import Response
 
 @app.route("/api/compute")
 def api_compute():
-    players = request.args.get("players", "")
+    players = request.args.get("players", "")  # comma-separated ids
     hand    = request.args.get("hand", "")
     start   = request.args.get("start", "")
     end     = request.args.get("end", "")
+
     player_ids = [p for p in players.split(",") if p] or None
+
     items = fetch_batted_balls(player_ids=player_ids, handedness=hand or None,
                                start_date=start or None, end_date=end or None, limit=5000)
     df = to_dataframe(items)
     if df.empty:
-        return jsonify({"summary":{"caught_total":0,"balls_total":0,"catch_rate":0.0},"LF":{},"CF":{},"RF":{}, "points":[]})
+        return jsonify({
+            "summary":{"caught_total":0,"balls_total":0,"catch_rate":0.0},
+            "LF":{}, "CF":{}, "RF":{},
+            "points": [],
+            "selected_players": player_ids or [],
+            "hand": hand
+        })
+
     df = compute_xy(df)
     best = optimize_three_fielders(df)
-    pts = df[["x_m","y_m","handedness"]].to_dict(orient="records")
-    return jsonify({**best, "points": pts})
 
-@app.route("/chart")
-def chart_png():
-    players = request.args.get("players", "")
-    hand    = request.args.get("hand", "")
-    start   = request.args.get("start", "")
-    end     = request.args.get("end", "")
-    player_ids = [p for p in players.split(",") if p] or None
-    items = fetch_batted_balls(player_ids=player_ids, handedness=hand or None,
-                               start_date=start or None, end_date=end or None, limit=5000)
-    df = to_dataframe(items)
-    if df.empty:
-        fig, ax = plt.subplots(figsize=(6,6)); ax.text(0.5,0.5,"No data", ha="center", va="center")
-        buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150); buf.seek(0); plt.close(fig)
-        return send_file(buf, mimetype="image/png")
-    df = compute_xy(df)
-    best = optimize_three_fielders(df)
-    fig = plot_spray(df, best)
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    return send_file(buf, mimetype="image/png")
+    # make positions JSON-friendly
+    def pos(o): 
+        x,y = o["pos"]; 
+        return {"x_m": float(x), "y_m": float(y), "caught": o["caught"], "total": o["total"]}
 
+    payload = {
+        "summary": best["summary"],
+        "LF": pos(best["LF"]),
+        "CF": pos(best["CF"]),
+        "RF": pos(best["RF"]),
+        "points": df[["x_m","y_m","handedness"]].to_dict(orient="records"),
+        "selected_players": player_ids or [],
+        "hand": hand
+    }
+    return jsonify(payload)
 # app.py (add near other routes)
 from adapter import fetch_players
 

@@ -19,6 +19,7 @@ def _get(path, params=None):
     return r.json()
 
 def fetch_batted_balls(player_ids=None, handedness=None, start_date=None, end_date=None, limit=5000):
+    # Adjust param names/path to match your API
     params = {
         "start_date": start_date,
         "end_date": end_date,
@@ -27,6 +28,7 @@ def fetch_batted_balls(player_ids=None, handedness=None, start_date=None, end_da
     }
     if player_ids:
         params["player_ids"] = ",".join(map(str, player_ids))
+
     rows, cursor = [], None
     while True:
         if cursor: params["cursor"] = cursor
@@ -38,13 +40,16 @@ def fetch_batted_balls(player_ids=None, handedness=None, start_date=None, end_da
             break
         time.sleep(0.15)
     return rows[:limit]
-# adapter.py added
+
 def fetch_players(start_date=None, end_date=None, handedness=None, limit=5000):
     """
-    Returns a list of dicts [{"player_id": ..., "player": ..., "handedness": ...}, ...]
-    Implement with your actual endpoint; fallback shown uses batted-balls unique values.
+    If your platform has /v1/players, call that instead.
+    Fallback dedupes from batted balls.
     """
-    # Fallback: dedupe from balls (keeps it simple)
+    # Example if you have a players endpoint:
+    # data = _get("/v1/players", {"start_date": start_date, "end_date": end_date, "hand": handedness, "limit": limit})
+    # return data.get("items", data.get("results", []))
+
     rows = fetch_batted_balls(
         player_ids=None,
         handedness=handedness,
@@ -52,7 +57,6 @@ def fetch_players(start_date=None, end_date=None, handedness=None, limit=5000):
         end_date=end_date,
         limit=limit
     )
-    # Minimal unique set
     seen, players = set(), []
     for r in rows:
         pid = r.get("batter_id")

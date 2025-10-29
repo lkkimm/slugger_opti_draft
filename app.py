@@ -139,5 +139,17 @@ def chart_png():
     buf.seek(0)
     return send_file(buf, mimetype="image/png")
 
+# app.py (add near other routes)
+from adapter import fetch_players
+
+@app.route("/api/players")
+def api_players():
+    hand  = request.args.get("hand", "")
+    start = request.args.get("start", "")
+    end   = request.args.get("end", "")
+    items = fetch_players(start_date=start or None, end_date=end or None, handedness=hand or None)
+    # return stable shape for the frontend selector
+    return jsonify({"players": items})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=True)

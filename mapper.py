@@ -1,10 +1,12 @@
 import pandas as pd
+
+# Map YOUR JSON keys to these columns:
 K_PLAYER      = "batter_name"
-K_HAND        = "bat_side"
+K_HAND        = "bat_side"            # "R" or "L"
 K_EV          = "exit_velocity_mph"
 K_LA          = "launch_angle_deg"
-K_SPRAY       = "spray_angle_deg"
-K_HT          = "hangtime_s"
+K_SPRAY       = "spray_angle_deg"     # +RF, -LF, 0=CF
+K_HT          = "hangtime_s"          # optional
 K_PLAYER_ID   = "batter_id"
 K_AT          = "timestamp"
 

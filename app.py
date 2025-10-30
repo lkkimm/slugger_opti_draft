@@ -1,187 +1,138 @@
-import io, os
-from datetime import date, timedelta
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template_string, request, send_file
 import pandas as pd
 import numpy as np
+import io
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
-from adapter import fetch_batted_balls, fetch_players
-from mapper import to_dataframe
 
 app = Flask(__name__)
 
-# --- physics & geometry ---
-MPH_TO_MS = 0.44704
-G = 9.81
-PLAYER_SPEED_MS = 7.0
-FIELD_RADIUS_M = 140.0     # ~460 ft
-GRID_STEP_M = 5.0          # coarse grid
+# --- Simple HTML UI ---
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Outfield Optimizer</title>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; background-color: #f4f4f4; }
+        h1 { color: #003366; }
+        form { margin-bottom: 1rem; }
+        button { padding: 0.5rem 1rem; margin-top: 1rem; }
+        .result { background: white; padding: 1rem; border-radius: 10px; }
+        img { max-width: 600px; margin-top: 1rem; border-radius: 10px; }
+    </style>
+</head>
+<body>
+    <h1>⚾ Outfield Optimizer Widget</h1>
+    <p>Choose a batter and pitcher handedness to calculate optimized outfield positions.</p>
 
-def est_hangtime(ev_mph, la_deg):
-    v = np.maximum(ev_mph, 0.0) * MPH_TO_MS
-    theta = np.radians(np.maximum(la_deg, 0.0))
-    return np.maximum(2.0 * v * np.sin(theta) / G, 0.0)
+    <form method="POST" enctype="multipart/form-data">
+        <label>Batter:</label>
+        <select name="player">
+            <option value="Dickerson">Dickerson</option>
+            <option value="Turner">Turner</option>
+        </select>
+        <br><br>
+        <label>Pitcher Hand:</label>
+        <select name="pitcher_hand">
+            <option value="L">Left-handed</option>
+            <option value="R">Right-handed</option>
+        </select>
+        <br>
+        <button type="submit">Compute Optimal Positions</button>
+    </form>
 
-def range_no_drag(ev_mph, la_deg):
-    v = np.maximum(ev_mph, 0.0) * MPH_TO_MS
-    theta = np.radians(np.maximum(la_deg, 0.0))
-    R = (v**2) * np.sin(2.0 * theta) / G
-    return np.clip(R, 0.0, FIELD_RADIUS_M)
+    {% if positions %}
+    <div class="result">
+        <h3>Optimal Outfield Positions:</h3>
+        <ul>
+            {% for fielder, coords in positions.items() %}
+                <li><b>{{ fielder }}</b>: X={{ coords[0] }}, Y={{ coords[1] }}</li>
+            {% endfor %}
+        </ul>
+        <a href="/download">📄 Download Printable CSV</a><br>
+        <img src="data:image/png;base64,{{ plot_data }}" alt="Spray Chart">
+    </div>
+    {% endif %}
+</body>
+</html>
+"""
 
-def xy_from_range(R, spray_deg):
-    phi = np.radians(spray_deg)
-    x = R * np.sin(phi)   # +x RF, -x LF
-    y = R * np.cos(phi)   # +y CF
-    return x, y
-
-def compute_xy(df):
-    if "hangtime_s" not in df or df["hangtime_s"].isna().all():
-        df["hangtime_s"] = est_hangtime(df["ev_mph"], df["la_deg"])
-    R = range_no_drag(df["ev_mph"], df["la_deg"])
-    df["x_m"], df["y_m"] = xy_from_range(R, df["spray_deg"])
+# --- Utility Functions ---
+def load_sample_data(player, hand):
+    """Load sample CSVs for players."""
+    if player == "Dickerson":
+        path = "Dickerson_L.csv" if hand == "L" else "Dickerson_R (1).csv"
+    else:
+        path = "Turner- L 2021-06-20-2 (2).xlsm"
+    df = pd.read_csv(path) if path.endswith(".csv") else pd.read_excel(path, engine="openpyxl")
+    if "x" not in df.columns or "y" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "x", df.columns[1]: "y"})
     return df
 
-def catch_flag(xs, ys, hts, fx, fy, speed=PLAYER_SPEED_MS):
-    dist = np.sqrt((xs - fx)**2 + (ys - fy)**2)
-    return (dist / speed <= hts).astype(int)
+def reward(ball, fielder_pos):
+    x, y = ball["x"], ball["y"]
+    fx, fy = fielder_pos
+    dist = np.sqrt((x - fx)**2 + (y - fy)**2)
+    return -dist
 
-def optimize_three_fielders(df):
-    # zone split by spray angle
-    lf = df[df["spray_deg"] < -10]
-    cf = df[(df["spray_deg"] >= -10) & (df["spray_deg"] <= 10)]
-    rf = df[df["spray_deg"] > 10]
+def optimize(df):
+    lf_range = [(x, y) for x in range(60, 120, 10) for y in range(250, 350, 10)]
+    cf_range = [(x, y) for x in range(120, 180, 10) for y in range(300, 400, 10)]
+    rf_range = [(x, y) for x in range(180, 240, 10) for y in range(250, 350, 10)]
 
-    grid = np.arange(0, FIELD_RADIUS_M + 1e-6, GRID_STEP_M)
+    best_score = float('inf')
+    best_positions = {}
 
-    def best_for(sub):
-        if sub.empty:
-            return {"pos": (float("nan"), float("nan")), "caught": 0, "total": 0}
-        xs, ys, hts = sub["x_m"].values, sub["y_m"].values, sub["hangtime_s"].values
-        best_caught, best_xy = -1, (0.0, 0.0)
-        for gx in grid:
-            for gy in grid:
-                if gy < 0:
-                    continue
-                caught = catch_flag(xs, ys, hts, gx, gy).sum()
-                if caught > best_caught:
-                    best_caught, best_xy = caught, (gx, gy)
-        return {"pos": best_xy, "caught": int(best_caught), "total": int(len(sub))}
+    for lf in lf_range:
+        for cf in cf_range:
+            for rf in rf_range:
+                total_penalty = 0
+                for _, b in df.iterrows():
+                    total_penalty += min(
+                        reward(b, lf),
+                        reward(b, cf),
+                        reward(b, rf)
+                    )
+                if total_penalty < best_score:
+                    best_score = total_penalty
+                    best_positions = {"LF": lf, "CF": cf, "RF": rf}
+    return best_positions
 
-    out = {"LF": best_for(lf), "CF": best_for(cf), "RF": best_for(rf)}
-    caught_total = out["LF"]["caught"] + out["CF"]["caught"] + out["RF"]["caught"]
-    balls_total = int(len(df))
-    out["summary"] = {
-        "caught_total": caught_total,
-        "balls_total": balls_total,
-        "catch_rate": (caught_total / balls_total) if balls_total else 0.0
-    }
-    return out
-
-def plot_spray(df, best):
+def create_plot(df, positions):
     fig, ax = plt.subplots(figsize=(6,6))
-    # outfield arc
-    circle = plt.Circle((0,0), FIELD_RADIUS_M, fill=False, linewidth=1)
-    ax.add_artist(circle)
-
-    for hand, sub in df.groupby("handedness"):
-        ax.scatter(sub["x_m"], sub["y_m"], s=12, alpha=0.7, label=f"{hand} ({len(sub)})")
-
-    for zone in ("LF","CF","RF"):
-        fx, fy = best[zone]["pos"]
-        if not (np.isnan(fx) or np.isnan(fy)):
-            ax.scatter([fx], [fy], marker="s", s=120, label=f"{zone} fielder")
-
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xlim(-FIELD_RADIUS_M, FIELD_RADIUS_M)
-    ax.set_ylim(0, FIELD_RADIUS_M)
-    ax.set_title("Optimal Fielder Position")
-    ax.set_xlabel("x (m)  ← LF        RF →")
-    ax.set_ylabel("y (m) toward CF")
-    ax.legend(loc="upper right", fontsize=8)
-    fig.tight_layout()
-    return fig
-
-# ---------- Routes ----------
-@app.route("/")
-def index():
-    today = date.today()
-    start = (today - timedelta(days=180)).isoformat()
-    return render_template("index.html", default_start=start, default_end=today.isoformat())
-
-@app.route("/api/players")
-def api_players():
-    hand  = request.args.get("hand", "")
-    start = request.args.get("start", "")
-    end   = request.args.get("end", "")
-    items = fetch_players(start_date=start or None, end_date=end or None, handedness=hand or None)
-    return jsonify({"players": items})
-
-@app.route("/api/compute")
-def api_compute():
-    players = request.args.get("players", "")  # comma-separated ids
-    hand    = request.args.get("hand", "")
-    start   = request.args.get("start", "")
-    end     = request.args.get("end", "")
-
-    player_ids = [p for p in players.split(",") if p] or None
-
-    items = fetch_batted_balls(player_ids=player_ids, handedness=hand or None,
-                               start_date=start or None, end_date=end or None, limit=5000)
-    df = to_dataframe(items)
-    if df.empty:
-        return jsonify({
-            "summary":{"caught_total":0,"balls_total":0,"catch_rate":0.0},
-            "LF":{}, "CF":{}, "RF":{},
-            "points": [],
-            "selected_players": player_ids or [],
-            "hand": hand
-        })
-
-    df = compute_xy(df)
-    best = optimize_three_fielders(df)
-
-    def pos(o):
-        x,y = o["pos"]
-        return {"x_m": float(x), "y_m": float(y), "caught": o["caught"], "total": o["total"]}
-
-    payload = {
-        "summary": best["summary"],
-        "LF": pos(best["LF"]),
-        "CF": pos(best["CF"]),
-        "RF": pos(best["RF"]),
-        "points": df[["x_m","y_m","handedness"]].to_dict(orient="records"),
-        "selected_players": player_ids or [],
-        "hand": hand
-    }
-    return jsonify(payload)
-
-@app.route("/chart")
-def chart_png():
-    players = request.args.get("players", "")
-    hand    = request.args.get("hand", "")
-    start   = request.args.get("start", "")
-    end     = request.args.get("end", "")
-    player_ids = [p for p in players.split(",") if p] or None
-
-    items = fetch_batted_balls(player_ids=player_ids, handedness=hand or None,
-                               start_date=start or None, end_date=end or None, limit=5000)
-    df = to_dataframe(items)
-    if df.empty:
-        fig, ax = plt.subplots(figsize=(6,6))
-        ax.text(0.5,0.5,"No data", ha="center", va="center")
-        buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150); buf.seek(0); plt.close(fig)
-        return send_file(buf, mimetype="image/png")
-
-    df = compute_xy(df)
-    best = optimize_three_fielders(df)
-    fig = plot_spray(df, best)
+    ax.scatter(df["x"], df["y"], c="gray", alpha=0.4, label="Batted Balls")
+    for f, (x, y) in positions.items():
+        ax.scatter(x, y, s=100, label=f)
+        ax.text(x+3, y+3, f, fontsize=9, color="blue")
+    ax.set_xlim(0, 300)
+    ax.set_ylim(0, 400)
+    ax.set_title("Optimized Outfield Positions")
+    ax.legend()
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150)
+    plt.savefig(buf, format="png", bbox_inches="tight")
     plt.close(fig)
-    buf.seek(0)
-    return send_file(buf, mimetype="image/png")
+    import base64
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+# --- Flask Routes ---
+@app.route("/", methods=["GET", "POST"])
+def index():
+    positions, plot_data = None, None
+    if request.method == "POST":
+        player = request.form["player"]
+        hand = request.form["pitcher_hand"]
+        df = load_sample_data(player, hand)
+        positions = optimize(df)
+        plot_data = create_plot(df, positions)
+        # Save printable CSV for download
+        pd.DataFrame.from_dict(positions, orient="index", columns=["X", "Y"]).to_csv("optimized_positions.csv")
+    return render_template_string(HTML_TEMPLATE, positions=positions, plot_data=plot_data)
+
+@app.route("/download")
+def download():
+    return send_file("optimized_positions.csv", as_attachment=True)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=True)
+    app.run(host="0.0.0.0", port=8080)

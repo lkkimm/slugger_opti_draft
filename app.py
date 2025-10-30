@@ -1,200 +1,200 @@
-from flask import Flask, render_template_string, request, send_file
+# app.py
+import os, io, base64, glob, sys, logging
+from typing import Dict, List, Tuple
+from flask import Flask, jsonify, request, send_file, render_template
 import pandas as pd
 import numpy as np
-import io
-import base64
-import os
+
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-app = Flask(__name__)
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+log = logging.getLogger(__name__)
 
-# ------------------------------------------------
-# 🔵 HTML UI (kept exactly like your previous version)
-# ------------------------------------------------
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Outfield Optimizer</title>
-    <style>
-        body { font-family: sans-serif; margin: 2rem; background-color: #f4f4f4; }
-        h1 { color: #003366; }
-        form { margin-bottom: 1rem; }
-        button { padding: 0.5rem 1rem; margin-top: 1rem; }
-        .result { background: white; padding: 1rem; border-radius: 10px; }
-        img { max-width: 600px; margin-top: 1rem; border-radius: 10px; }
-    </style>
-</head>
-<body>
-    <h1>⚾ Outfield Optimizer Widget</h1>
-    <p>Choose a batter and pitcher handedness to calculate optimized outfield positions (sample data demo).</p>
+app = Flask(__name__, template_folder="templates")
 
-    <form method="POST" enctype="multipart/form-data">
-        <label>Batter:</label>
-        <select name="player">
-            <option value="Dickerson">Dickerson</option>
-            <option value="Turner">Turner</option>
-        </select>
-        <br><br>
-        <label>Pitcher Hand:</label>
-        <select name="pitcher_hand">
-            <option value="L">Left-handed</option>
-            <option value="R">Right-handed</option>
-            <option value="B">Both (average)</option>
-        </select>
-        <br>
-        <button type="submit">Compute Optimal Positions</button>
-    </form>
-
-    {% if error %}
-      <div style="color:red; font-weight:bold;">⚠️ {{ error }}</div>
-    {% endif %}
-
-    {% if positions %}
-    <div class="result">
-        <h3>Optimal Outfield Positions:</h3>
-        <ul>
-            {% for fielder, coords in positions.items() %}
-                <li><b>{{ fielder }}</b>: X={{ coords[0]|round(1) }}, Y={{ coords[1]|round(1) }}</li>
-            {% endfor %}
-        </ul>
-        <a href="/download">📄 Download Printable CSV</a><br>
-        <img src="data:image/png;base64,{{ plot_data }}" alt="Spray Chart">
-    </div>
-    {% endif %}
-</body>
-</html>
-"""
-
-# ------------------------------------------------
-# ⚙️ Data loading helpers
-# ------------------------------------------------
-def safe_load_csv_or_xlsm(player, hand):
+# -----------------------------
+# Helpers: data discovery/load
+# -----------------------------
+def discover_players() -> Dict[str, List[str]]:
     """
-    Loads Dickerson/Turner sample data safely from your repo (CSV/XLSM).
+    Scan repo for files named <Player>_L.(csv|xlsm) or <Player>_R.(csv|xlsm).
+    Returns: { "Dickerson": ["L","R"], "Turner": ["L"], ... }
     """
-    try:
-        if player == "Dickerson":
-            fname = f"Dickerson_{hand}.csv"
-        elif player == "Turner":
-            # If you only have Turner_L for demo, fallback to L always
-            fname = f"Turner_L.xlsm"
-        else:
-            raise ValueError("Unknown player.")
+    files = glob.glob("*_[LR].csv") + glob.glob("*_[LR].xlsm")
+    found = {}
+    for f in files:
+        base = os.path.basename(f)
+        try:
+            name, hand_with_ext = base.split("_", 1)
+            hand = hand_with_ext[0].upper()  # 'L' or 'R'
+            if hand in ("L", "R"):
+                found.setdefault(name, [])
+                if hand not in found[name]:
+                    found[name].append(hand)
+        except Exception:
+            continue
+    return found
 
-        if not os.path.exists(fname):
-            raise FileNotFoundError(f"Missing file: {fname}")
+def load_sample(player: str, hand: str) -> pd.DataFrame:
+    """
+    Load CSV/XLSM for a player/hand. Normalizes to columns ['x','y'].
+    """
+    candidates = [f"{player}_{hand}.csv", f"{player}_{hand}.xlsm"]
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if path is None:
+        raise FileNotFoundError(f"Missing sample file for {player} {hand}: tried {', '.join(candidates)}")
 
-        if fname.endswith(".csv"):
-            df = pd.read_csv(fname)
-        else:
-            df = pd.read_excel(fname, engine="openpyxl")
+    if path.endswith(".csv"):
+        df = pd.read_csv(path)
+    else:
+        df = pd.read_excel(path, engine="openpyxl")
 
-        # Clean up and normalize columns
-        df.columns = [c.lower().strip() for c in df.columns]
-        if "x" not in df.columns or "y" not in df.columns:
-            # Try guessing numeric columns
-            numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-            if len(numeric_cols) >= 2:
-                df = df.rename(columns={numeric_cols[0]: "x", numeric_cols[1]: "y"})
-            else:
-                raise ValueError(f"{fname} does not have numeric x/y columns")
+    # Normalize columns
+    lower = {c.lower().strip(): c for c in df.columns}
+    # common aliases
+    for x_alias, y_alias in [("x","y"), ("hc_x","hc_y"), ("spray_x","spray_y"), ("px","py")]:
+        if x_alias in lower and y_alias in lower:
+            df = df[[lower[x_alias], lower[y_alias]]].rename(columns={lower[x_alias]:"x", lower[y_alias]:"y"})
+            break
+    else:
+        # fallback: first two numeric columns
+        num = df.select_dtypes(include="number").columns.tolist()
+        if len(num) < 2:
+            raise ValueError(f"{path} does not contain usable numeric x/y columns")
+        df = df[[num[0], num[1]]].rename(columns={num[0]:"x", num[1]:"y"})
 
-        return df[["x", "y"]].dropna()
+    # bounds clamp (just in case)
+    df = df[(df["x"].between(0, 300)) & (df["y"].between(0, 420))].dropna()
+    if df.empty:
+        raise ValueError(f"{path} produced zero rows after cleaning")
+    return df.reset_index(drop=True)
 
-    except Exception as e:
-        raise RuntimeError(f"Error loading data for {player} ({hand}): {e}")
-
-# ------------------------------------------------
-# 🧮 Optimization logic
-# ------------------------------------------------
-def reward(ball, fielder_pos):
-    x, y = ball["x"], ball["y"]
-    fx, fy = fielder_pos
-    return -np.sqrt((x - fx)**2 + (y - fy)**2)
-
-def optimize(df):
-    lf_range = [(x, y) for x in range(60, 120, 15) for y in range(250, 350, 15)]
-    cf_range = [(x, y) for x in range(120, 180, 15) for y in range(300, 400, 15)]
-    rf_range = [(x, y) for x in range(180, 240, 15) for y in range(250, 350, 15)]
+# -----------------------------
+# Core: optimization + plotting
+# -----------------------------
+def optimize_positions(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
+    # coarser grids for speed on small dynos; tweak step if you want finer
+    lf_grid = [(x, y) for x in range(60, 120, 15) for y in range(250, 350, 15)]
+    cf_grid = [(x, y) for x in range(120, 180, 15) for y in range(300, 400, 15)]
+    rf_grid = [(x, y) for x in range(180, 240, 15) for y in range(250, 350, 15)]
 
     best_score = float("inf")
-    best_positions = {}
+    best = {}
 
-    for lf in lf_range:
-        for cf in cf_range:
-            for rf in rf_range:
-                total_penalty = 0
-                for _, b in df.iterrows():
-                    total_penalty += min(
-                        reward(b, lf), reward(b, cf), reward(b, rf)
-                    )
+    bx = df["x"].to_numpy()
+    by = df["y"].to_numpy()
+
+    for lf in lf_grid:
+        dlf = np.hypot(bx - lf[0], by - lf[1])
+        for cf in cf_grid:
+            dcf = np.hypot(bx - cf[0], by - cf[1])
+            for rf in rf_grid:
+                drf = np.hypot(bx - rf[0], by - rf[1])
+                # penalty is negative distance to closest fielder
+                total_penalty = -(np.minimum(np.minimum(dlf, dcf), drf)).sum()
                 if total_penalty < best_score:
                     best_score = total_penalty
-                    best_positions = {"LF": lf, "CF": cf, "RF": rf}
-    return best_positions
+                    best = {"LF": lf, "CF": cf, "RF": rf}
+    return best
 
-def average_positions(pos1, pos2):
-    """Average two position sets (for 'Both' handed)."""
-    return {f: ((pos1[f][0] + pos2[f][0]) / 2, (pos1[f][1] + pos2[f][1]) / 2) for f in pos1}
+def average_positions(pL: Dict[str, Tuple[float,float]], pR: Dict[str, Tuple[float,float]]):
+    return {k: ((pL[k][0]+pR[k][0])/2.0, (pL[k][1]+pR[k][1])/2.0) for k in pL}
 
-# ------------------------------------------------
-# 📈 Visualization
-# ------------------------------------------------
-def plot_positions(df, positions):
-    fig, ax = plt.subplots(figsize=(6,6))
-    ax.scatter(df["x"], df["y"], c="gray", alpha=0.5, label="Batted Balls")
+def make_plot_png_b64(df: pd.DataFrame, positions: Dict[str, Tuple[float,float]]) -> str:
+    fig, ax = plt.subplots(figsize=(6.5,6.5))
+    ax.scatter(df["x"], df["y"], alpha=0.45, s=15, label="Batted balls")
     for name, (x, y) in positions.items():
-        ax.scatter(x, y, s=100, label=name)
-        ax.text(x+5, y+5, name, fontsize=9, color='blue')
-    ax.set_xlim(0, 300)
-    ax.set_ylim(0, 400)
-    ax.set_xlabel("Horizontal Distance (ft)")
-    ax.set_ylabel("Vertical Distance (ft)")
-    ax.set_title("Optimized Outfield Positions")
-    ax.legend()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
-    plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode('utf-8')
+        ax.scatter(x, y, s=120, label=name)
+        ax.text(x+4, y+4, name, color="tab:blue", fontsize=9)
+    ax.set_xlim(0, 300); ax.set_ylim(0, 420)
+    ax.set_xlabel("Horizontal (ft)"); ax.set_ylabel("Depth (ft)")
+    ax.set_title("Optimized Outfield Placement")
+    ax.legend(loc="upper right")
+    buf = io.BytesIO(); plt.savefig(buf, format="png", bbox_inches="tight"); plt.close(fig)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-# ------------------------------------------------
-# 🌐 Flask Routes
-# ------------------------------------------------
-@app.route("/", methods=["GET", "POST"])
-def index():
-    positions, plot_data, error = None, None, None
+LAST_CSV_PATH = "optimized_positions.csv"
+
+# -----------------------------
+# Routes for your UI
+# -----------------------------
+@app.route("/")
+def home():
+    # serve your existing frontend (keep your index.html if you have it)
     try:
-        if request.method == "POST":
-            player = request.form.get("player")
-            hand = request.form.get("pitcher_hand")
+        return render_template("index.html")
+    except Exception:
+        # fallback simple note if template missing
+        return "<h2>Backend up. Frontend expects /templates/index.html</h2>"
 
-            if hand == "B":
-                df_L = safe_load_csv_or_xlsm(player, "L")
-                df_R = safe_load_csv_or_xlsm(player, "R")
-                pos_L = optimize(df_L)
-                pos_R = optimize(df_R)
-                positions = average_positions(pos_L, pos_R)
-                df = pd.concat([df_L, df_R])
-            else:
-                df = safe_load_csv_or_xlsm(player, hand)
-                positions = optimize(df)
+@app.route("/api/players")
+def api_players():
+    """
+    Returns players your UI can show in the left list.
+    Shape your JS is expecting: { players: [{name:'Dickerson', hands:['L','R']}, ...] }
+    """
+    players = discover_players()
+    payload = {"players": [{"name": p, "hands": sorted(players[p])} for p in sorted(players.keys())]}
+    return jsonify(payload)
 
-            plot_data = plot_positions(df, positions)
-            pd.DataFrame.from_dict(positions, orient="index", columns=["X","Y"]).to_csv("optimized_positions.csv")
+@app.route("/api/compute", methods=["POST"])
+def api_compute():
+    """
+    Body example your UI can send:
+    {
+      "players": ["Dickerson"],     // first batter, or multiple later
+      "handedness": "L" | "R" | "B",
+      "start": "2021-01-01",        // ignored for sample mode
+      "end": "2021-12-31"           // ignored for sample mode
+    }
+    """
+    try:
+        req = request.get_json(force=True) or {}
+        players = req.get("players") or []
+        hand = (req.get("handedness") or "L").upper()
 
+        if not players:
+            return jsonify({"error": "No players selected"}), 400
+
+        player = players[0]  # first batter, as per your workflow
+
+        if hand == "B":
+            dfL = load_sample(player, "L")
+            dfR = load_sample(player, "R")
+            posL = optimize_positions(dfL)
+            posR = optimize_positions(dfR)
+            positions = average_positions(posL, posR)
+            df = pd.concat([dfL, dfR], ignore_index=True)
+        else:
+            df = load_sample(player, hand)
+            positions = optimize_positions(df)
+
+        # Save printable CSV
+        pd.DataFrame.from_dict(positions, orient="index", columns=["X","Y"]).to_csv(LAST_CSV_PATH)
+
+        # Plot
+        png_b64 = make_plot_png_b64(df, positions)
+
+        return jsonify({
+            "ok": True,
+            "player": player,
+            "handedness": hand,
+            "positions": positions,                 # {"LF":[x,y],...}
+            "plot_png_base64": png_b64,             # frontend can <img src="data:image/png;base64, ...">
+            "download_url": "/download"
+        })
     except Exception as e:
-        error = str(e)
-
-    return render_template_string(HTML_TEMPLATE, positions=positions, plot_data=plot_data, error=error)
+        log.exception("api_compute failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/download")
 def download():
-    if not os.path.exists("optimized_positions.csv"):
-        return "No results yet. Please run optimization first.", 404
-    return send_file("optimized_positions.csv", as_attachment=True)
+    if not os.path.exists(LAST_CSV_PATH):
+        return "Run a computation first.", 404
+    return send_file(LAST_CSV_PATH, as_attachment=True)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    # local test
+    app.run(host="0.0.0.0", port=8080, debug=True)

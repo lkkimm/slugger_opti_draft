@@ -1,45 +1,65 @@
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8">
-    <title>Spray Chart Optimizer</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-      .row { display: flex; gap: 24px; align-items: flex-start; }
-      .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
-      .controls { min-width: 320px; }
-      .chart { max-width: 660px; }
-      label { display: block; margin: 8px 0 4px; font-weight: 600; }
-      button { padding: 8px 12px; border-radius: 6px; border: 1px solid #aaa; background: #f7f7f7; cursor: pointer; }
-      input, select { width: 100%; padding: 6px; }
-    </style>
-  </head>
-  <body>
-    <h1>Spray Chart Optimizer</h1>
-    <div class="row">
-      <div class="card controls">
-        <form method="GET" action="/chart" target="chartframe">
-          <label>Player IDs (comma-separated)</label>
-          <input name="players" placeholder="e.g. 123,456">
-          <label>Handedness</label>
-          <select name="hand">
-            <option value="">(any)</option>
-            <option value="L">L</option>
-            <option value="R">R</option>
-          </select>
-          <label>Start date</label>
-          <input type="date" name="start" value="{{default_start}}">
-          <label>End date</label>
-          <input type="date" name="end" value="{{default_end}}">
-          <div style="margin-top: 10px;">
-            <button type="submit">Generate Spray Chart</button>
-          </div>
-        </form>
-        <p style="font-size: 12px; color: #666;">JSON API: <code>/api/compute</code> with same query params.</p>
-      </div>
-      <div class="card chart">
-        <iframe name="chartframe" style="width:640px; height:640px; border:0;"></iframe>
-      </div>
-    </div>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <title>Outfield Optimizer (Demo)</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f5f7fa;margin:2rem;}
+    .card{background:#fff;padding:1rem 1.5rem;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.06);max-width:880px}
+    h1{color:#002b5c;margin:0 0 1rem}
+    label{font-weight:600}
+    select,button{padding:.5rem .6rem;font-size:1rem}
+    button{cursor:pointer;border:0;border-radius:8px;background:#002b5c;color:#fff}
+    .mt{margin-top:1rem}
+    img{max-width:760px;border-radius:12px;margin-top:.75rem}
+    .err{color:#b00020;font-weight:600;margin:.5rem 0}
+    ul{line-height:1.6}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>⚾ Outfield Optimizer (Sample Data)</h1>
+    <p>Pick a batter and pitcher handedness. This demo uses the CSV/XLSM files that are in your repo.</p>
+
+    <form class="mt" method="POST">
+      <label>Batter:</label>
+      <select name="player">
+        {% if players %}
+          {% for p in players %}
+            <option value="{{p}}" {% if p==default_player %}selected{% endif %}>{{p}}</option>
+          {% endfor %}
+        {% else %}
+          <option value="Dickerson">Dickerson</option>
+        {% endif %}
+      </select>
+      &nbsp;&nbsp;
+      <label>Pitcher Hand:</label>
+      <select name="hand">
+        <option value="L">L</option>
+        <option value="R">R</option>
+        <option value="B">Both (average)</option>
+      </select>
+      &nbsp;&nbsp;
+      <button type="submit">Compute</button>
+    </form>
+
+    {% if error %}
+      <div class="err">Error: {{error}}</div>
+      <p class="err">Check that files like <code>{{default_player}}_L.csv</code> / <code>{{default_player}}_R.csv</code> exist in the repo and have numeric x/y columns.</p>
+    {% endif %}
+
+    {% if result %}
+      <h3 class="mt">Optimal Outfield Positions</h3>
+      <ul>
+        {% for f, c in result.items() %}
+          <li><b>{{f}}</b>: X={{c[0] | round(1)}}, Y={{c[1] | round(1)}}</li>
+        {% endfor %}
+      </ul>
+      <p><a href="/download">📄 Download printable CSV</a></p>
+      {% if plot_data %}
+        <img src="data:image/png;base64,{{plot_data}}" alt="Spray Chart"/>
+      {% endif %}
+    {% endif %}
+  </div>
+</body>
 </html>

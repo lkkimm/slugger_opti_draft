@@ -1,6 +1,7 @@
-# app.py
+# app.py — demo-ready backend for your existing Spray Chart Optimizer UI
+
 import os, io, base64, glob, sys, logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 from flask import Flask, jsonify, request, send_file, render_template
 import pandas as pd
 import numpy as np
@@ -15,20 +16,30 @@ log = logging.getLogger(__name__)
 app = Flask(__name__, template_folder="templates")
 
 # -----------------------------
-# Helpers: data discovery/load
+# DEMO CONFIG (hardcode who appears in the Players list)
+# Change this to match files you’ve committed.
+# Clean filenames expected: <Player>_L.csv / <Player>_R.csv (or .xlsm)
+# -----------------------------
+DEMO_MODE = True
+DEMO_PLAYERS = {
+    "Dickerson": ["L", "R"],
+    # Uncomment if you actually have the file(s):
+    # "Turner": ["L"]
+}
+
+LAST_CSV_PATH = "optimized_positions.csv"
+
+# -----------------------------
+# Data discovery / loading
 # -----------------------------
 def discover_players() -> Dict[str, List[str]]:
-    """
-    Scan repo for files named <Player>_L.(csv|xlsm) or <Player>_R.(csv|xlsm).
-    Returns: { "Dickerson": ["L","R"], "Turner": ["L"], ... }
-    """
     files = glob.glob("*_[LR].csv") + glob.glob("*_[LR].xlsm")
-    found = {}
+    found: Dict[str, List[str]] = {}
     for f in files:
         base = os.path.basename(f)
         try:
-            name, hand_with_ext = base.split("_", 1)
-            hand = hand_with_ext[0].upper()  # 'L' or 'R'
+            name, rest = base.split("_", 1)
+            hand = rest[0].upper()  # L or R
             if hand in ("L", "R"):
                 found.setdefault(name, [])
                 if hand not in found[name]:
@@ -39,7 +50,7 @@ def discover_players() -> Dict[str, List[str]]:
 
 def load_sample(player: str, hand: str) -> pd.DataFrame:
     """
-    Load CSV/XLSM for a player/hand. Normalizes to columns ['x','y'].
+    Reads <Player>_<Hand>.csv or .xlsm and returns columns ['x','y'] clipped to field bounds.
     """
     candidates = [f"{player}_{hand}.csv", f"{player}_{hand}.xlsm"]
     path = next((p for p in candidates if os.path.exists(p)), None)
@@ -51,31 +62,28 @@ def load_sample(player: str, hand: str) -> pd.DataFrame:
     else:
         df = pd.read_excel(path, engine="openpyxl")
 
-    # Normalize columns
+    # Normalize to x,y
     lower = {c.lower().strip(): c for c in df.columns}
-    # common aliases
-    for x_alias, y_alias in [("x","y"), ("hc_x","hc_y"), ("spray_x","spray_y"), ("px","py")]:
-        if x_alias in lower and y_alias in lower:
-            df = df[[lower[x_alias], lower[y_alias]]].rename(columns={lower[x_alias]:"x", lower[y_alias]:"y"})
+    for xa, ya in [("x", "y"), ("hc_x", "hc_y"), ("spray_x", "spray_y"), ("px", "py")]:
+        if xa in lower and ya in lower:
+            df = df[[lower[xa], lower[ya]]].rename(columns={lower[xa]: "x", lower[ya]: "y"})
             break
     else:
-        # fallback: first two numeric columns
         num = df.select_dtypes(include="number").columns.tolist()
         if len(num) < 2:
-            raise ValueError(f"{path} does not contain usable numeric x/y columns")
-        df = df[[num[0], num[1]]].rename(columns={num[0]:"x", num[1]:"y"})
+            raise ValueError(f"{path} has no usable numeric x/y columns")
+        df = df[[num[0], num[1]]].rename(columns={num[0]: "x", num[1]: "y"})
 
-    # bounds clamp (just in case)
-    df = df[(df["x"].between(0, 300)) & (df["y"].between(0, 420))].dropna()
+    df = df[(df["x"].between(0, 300)) & (df["y"].between(0, 420))].dropna().reset_index(drop=True)
     if df.empty:
         raise ValueError(f"{path} produced zero rows after cleaning")
-    return df.reset_index(drop=True)
+    return df
 
 # -----------------------------
-# Core: optimization + plotting
+# Optimization + plotting
 # -----------------------------
-def optimize_positions(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
-    # coarser grids for speed on small dynos; tweak step if you want finer
+def optimize_positions(df: pd.DataFrame) -> Dict[str, Tuple[float, float]]:
+    # Coarse grid (fast on small dynos). Increase fidelity by reducing step.
     lf_grid = [(x, y) for x in range(60, 120, 15) for y in range(250, 350, 15)]
     cf_grid = [(x, y) for x in range(120, 180, 15) for y in range(300, 400, 15)]
     rf_grid = [(x, y) for x in range(180, 240, 15) for y in range(250, 350, 15)]
@@ -99,15 +107,15 @@ def optimize_positions(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
                     best = {"LF": lf, "CF": cf, "RF": rf}
     return best
 
-def average_positions(pL: Dict[str, Tuple[float,float]], pR: Dict[str, Tuple[float,float]]):
-    return {k: ((pL[k][0]+pR[k][0])/2.0, (pL[k][1]+pR[k][1])/2.0) for k in pL}
+def average_positions(pL: Dict[str, Tuple[float, float]], pR: Dict[str, Tuple[float, float]]):
+    return {k: ((pL[k][0] + pR[k][0]) / 2.0, (pL[k][1] + pR[k][1]) / 2.0) for k in pL}
 
-def make_plot_png_b64(df: pd.DataFrame, positions: Dict[str, Tuple[float,float]]) -> str:
-    fig, ax = plt.subplots(figsize=(6.5,6.5))
+def make_plot_png_b64(df: pd.DataFrame, positions: Dict[str, Tuple[float, float]]) -> str:
+    fig, ax = plt.subplots(figsize=(6.75, 6.75))
     ax.scatter(df["x"], df["y"], alpha=0.45, s=15, label="Batted balls")
     for name, (x, y) in positions.items():
         ax.scatter(x, y, s=120, label=name)
-        ax.text(x+4, y+4, name, color="tab:blue", fontsize=9)
+        ax.text(x + 4, y + 4, name, color="tab:blue", fontsize=9)
     ax.set_xlim(0, 300); ax.set_ylim(0, 420)
     ax.set_xlabel("Horizontal (ft)"); ax.set_ylabel("Depth (ft)")
     ax.set_title("Optimized Outfield Placement")
@@ -115,52 +123,75 @@ def make_plot_png_b64(df: pd.DataFrame, positions: Dict[str, Tuple[float,float]]
     buf = io.BytesIO(); plt.savefig(buf, format="png", bbox_inches="tight"); plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-LAST_CSV_PATH = "optimized_positions.csv"
-
 # -----------------------------
-# Routes for your UI
+# Routes (match your existing UI)
 # -----------------------------
 @app.route("/")
 def home():
-    # serve your existing frontend (keep your index.html if you have it)
+    # serve your current frontend (templates/index.html)
     try:
         return render_template("index.html")
     except Exception:
-        # fallback simple note if template missing
-        return "<h2>Backend up. Frontend expects /templates/index.html</h2>"
+        return "<h2>Backend is running. Add templates/index.html for the UI.</h2>"
 
 @app.route("/api/players")
 def api_players():
     """
-    Returns players your UI can show in the left list.
-    Shape your JS is expecting: { players: [{name:'Dickerson', hands:['L','R']}, ...] }
+    Return exactly what your left panel expects: a plain array of names.
     """
-    players = discover_players()
-    payload = {"players": [{"name": p, "hands": sorted(players[p])} for p in sorted(players.keys())]}
-    return jsonify(payload)
+    if DEMO_MODE:
+        names = sorted(DEMO_PLAYERS.keys())
+    else:
+        names = sorted(discover_players().keys())
+    return jsonify(names)
+
+def _coerce_players(payload: Any) -> List[str]:
+    if isinstance(payload, dict) and "players" in payload:
+        payload = payload["players"]
+    if isinstance(payload, list):
+        return [str(x).strip() for x in payload if str(x).strip()]
+    if isinstance(payload, str):
+        chunks = [t.strip() for part in payload.split("\n") for t in part.split(",")]
+        return [c for c in chunks if c]
+    return []
 
 @app.route("/api/compute", methods=["POST"])
 def api_compute():
     """
-    Body example your UI can send:
-    {
-      "players": ["Dickerson"],     // first batter, or multiple later
-      "handedness": "L" | "R" | "B",
-      "start": "2021-01-01",        // ignored for sample mode
-      "end": "2021-12-31"           // ignored for sample mode
-    }
+    Accepts:
+      {"players":["Dickerson"], "handedness":"L|R|B|any"}
+      {"players":"Dickerson", "handedness":"L"}
+      or "Dickerson"
+    Returns positions + base64 image + /download link.
     """
     try:
-        req = request.get_json(force=True) or {}
-        players = req.get("players") or []
-        hand = (req.get("handedness") or "L").upper()
+        data = request.get_json(force=True, silent=True)
+        if data is None:
+            data = {"players": request.form.get("players", ""),
+                    "handedness": request.form.get("handedness", "any")}
 
+        players = _coerce_players(data)
         if not players:
-            return jsonify({"error": "No players selected"}), 400
+            return jsonify({"ok": False, "error": "No players provided"}), 400
 
-        player = players[0]  # first batter, as per your workflow
+        player = players[0]
+        hand = str((data.get("handedness") if isinstance(data, dict) else "any") or "any").upper()
+
+        if DEMO_MODE:
+            available = DEMO_PLAYERS.get(player, [])
+        else:
+            available = discover_players().get(player, [])
+
+        if not available:
+            return jsonify({"ok": False, "error": f"No sample files found for {player}."}), 400
+
+        # Resolve ANY → B if both exist; else the one available
+        if hand in ("ANY", "(ANY)"):
+            hand = "B" if set(available) == {"L", "R"} else available[0]
 
         if hand == "B":
+            if not {"L", "R"}.issubset(set(available)):
+                return jsonify({"ok": False, "error": f"{player} only has {available}. Choose L or R."}), 400
             dfL = load_sample(player, "L")
             dfR = load_sample(player, "R")
             posL = optimize_positions(dfL)
@@ -168,21 +199,21 @@ def api_compute():
             positions = average_positions(posL, posR)
             df = pd.concat([dfL, dfR], ignore_index=True)
         else:
+            if hand not in available:
+                hand = available[0]  # graceful fallback
             df = load_sample(player, hand)
             positions = optimize_positions(df)
 
-        # Save printable CSV
-        pd.DataFrame.from_dict(positions, orient="index", columns=["X","Y"]).to_csv(LAST_CSV_PATH)
-
-        # Plot
-        png_b64 = make_plot_png_b64(df, positions)
+        # Save printable CSV and make plot
+        pd.DataFrame.from_dict(positions, orient="index", columns=["X", "Y"]).to_csv(LAST_CSV_PATH)
+        img_b64 = make_plot_png_b64(df, positions)
 
         return jsonify({
             "ok": True,
             "player": player,
             "handedness": hand,
-            "positions": positions,                 # {"LF":[x,y],...}
-            "plot_png_base64": png_b64,             # frontend can <img src="data:image/png;base64, ...">
+            "positions": positions,      # {"LF":[x,y], "CF":[x,y], "RF":[x,y]}
+            "image_base64": img_b64,     # <img src="data:image/png;base64, ...">
             "download_url": "/download"
         })
     except Exception as e:
@@ -196,5 +227,4 @@ def download():
     return send_file(LAST_CSV_PATH, as_attachment=True)
 
 if __name__ == "__main__":
-    # local test
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080)

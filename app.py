@@ -200,100 +200,122 @@ def make_plot(df: pd.DataFrame,
               batter_label: str,
               pitcher_hand: str) -> str:
     """
-    Draw a rough baseball field like Tony's sketch:
-    - home plate at bottom
-    - wedge-shaped outfield
-    - left/center/right zones
-    - orange spray dots
-    - red boxes for LF / CF / RF
+    Draw a sketch-style baseball field:
+      - wedge-shaped field like Tony's diagram
+      - big LF / CF / RF zones (blue boxes)
+      - optimized point inside each zone (red dot)
+      - orange spray dots over the field
     """
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    # --- basic field geometry in our x,y coordinate system (40–260, 200–420) ---
-    home_plate = (150, 205)
-    left_foul_corner = (40, 260)
-    right_foul_corner = (260, 260)
-    left_wall = (40, 420)
-    right_wall = (260, 420)
+    # --- Field geometry approximately matching the sketch ---
+    home = (150, 210)
+    left_foul = (50, 260)
+    right_foul = (250, 260)
 
-    # Outfield "fan" (outfield grass)
+    # curved-ish outfield fence using a few points
+    outfield_points = [
+        left_foul,
+        (80, 360),
+        (150, 390),
+        (220, 360),
+        right_foul
+    ]
+
+    # outfield grass fan
     outfield_poly = Polygon(
-        [left_foul_corner, left_wall, right_wall, right_foul_corner],
+        outfield_points,
         closed=True,
         facecolor="#0b5d23",
         edgecolor="white",
         linewidth=2,
-        zorder=0,
+        zorder=0
     )
     ax.add_patch(outfield_poly)
 
-    # Infield wedge
+    # infield dirt wedge
     infield_poly = Polygon(
-        [home_plate, left_foul_corner, right_foul_corner],
+        [home, left_foul, right_foul],
         closed=True,
         facecolor="#c49a6c",
         edgecolor="white",
         linewidth=2,
-        zorder=1,
+        zorder=1
     )
     ax.add_patch(infield_poly)
 
-    # Foul lines
-    ax.plot([home_plate[0], left_foul_corner[0]],
-            [home_plate[1], left_foul_corner[1]],
-            color="white", linewidth=2, zorder=2)
-    ax.plot([home_plate[0], right_foul_corner[0]],
-            [home_plate[1], right_foul_corner[1]],
-            color="white", linewidth=2, zorder=2)
+    # foul lines (home to the two corners)
+    ax.plot(
+        [home[0], left_foul[0]],
+        [home[1], left_foul[1]],
+        color="white", linewidth=2, zorder=2
+    )
+    ax.plot(
+        [home[0], right_foul[0]],
+        [home[1], right_foul[1]],
+        color="white", linewidth=2, zorder=2
+    )
 
-    # Rough center line to split LF / CF / RF visually
-    ax.plot([150, 150], [260, 420], color="#66aa66", linestyle="--", linewidth=1, zorder=2)
+    # center line like Tony's green line
+    ax.plot(
+        [150, 150],
+        [260, 390],
+        color="#4caf50",
+        linestyle="--",
+        linewidth=1.5,
+        zorder=2
+    )
 
-    # --- spray chart (orange balls) ---
+    # --- Spray chart (orange balls) ---
     ax.scatter(
         df["x"], df["y"],
         c="#ff9933", s=30, alpha=0.7,
         edgecolor="none", zorder=3
     )
 
-    # --- red boxes for final LF / CF / RF positions ---
-    box_w, box_h = 14, 14
-    for name, (x, y) in positions.items():
-        # box
-        rect = Rectangle(
-            (x - box_w / 2.0, y - box_h / 2.0),
-            box_w, box_h,
+    # --- LF / CF / RF zones (big blue boxes) ---
+    zone_w, zone_h = 70, 80   # size of the big LF/CF/RF zone boxes
+
+    for name, (cx, cy) in positions.items():
+        # large blue box representing the zone that fielder "covers"
+        zone_rect = Rectangle(
+            (cx - zone_w / 2, cy - zone_h / 2),
+            zone_w, zone_h,
             linewidth=2,
-            edgecolor="red",
+            edgecolor="deepskyblue",
             facecolor="none",
-            zorder=5
+            zorder=4
         )
-        ax.add_patch(rect)
+        ax.add_patch(zone_rect)
 
-        # dot inside
-        ax.scatter(x, y, c="red", s=80, zorder=6)
+        # red dot at the optimized point inside the zone
+        ax.scatter(cx, cy, c="red", s=80, zorder=5)
 
-        # label above
+        # label inside box
         ax.text(
-            x, y + box_h,
+            cx, cy,
             name,
-            color="red",
+            color="deepskyblue",
             fontsize=10,
             weight="bold",
             ha="center",
-            va="bottom",
-            zorder=7
+            va="center",
+            zorder=6
         )
 
-    # --- cosmetic stuff ---
+    # --- Cosmetics to match the sketch feel ---
     ax.set_xlim(40, 260)
-    ax.set_ylim(200, 430)
+    ax.set_ylim(200, 410)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.axis("off")
 
-    ax.set_title(f"{batter_label} vs. {pitcher_hand}",
-                 color="white", fontsize=14, pad=10)
+    ax.set_title(
+        f"{batter_label}  vs. {pitcher_hand}",
+        color="white",
+        fontsize=14,
+        pad=10
+    )
 
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight")

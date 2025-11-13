@@ -160,7 +160,7 @@ def generate_spray(batter_id: str, pitcher_hand: str) -> pd.DataFrame:
 def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
     """
     3-layer brute-force over LF, CF, RF.
-    Reward/penalty is based on distance from each batted ball to nearest fielder.
+    Minimizes total distance from batted balls to nearest fielder.
     """
     lf_grid = [(x,y) for x in range(70,120,10)  for y in range(260,330,10)]
     cf_grid = [(x,y) for x in range(120,180,10) for y in range(310,380,10)]
@@ -169,7 +169,7 @@ def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
     bx = df["x"].to_numpy()
     by = df["y"].to_numpy()
 
-    best_score = float("inf")
+    best_score = float("inf")   # we want the *smallest* total distance
     best = {}
 
     for lf in lf_grid:
@@ -178,11 +178,17 @@ def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
             dcf = np.hypot(bx - cf[0], by - cf[1])
             for rf in rf_grid:
                 drf = np.hypot(bx - rf[0], by - rf[1])
+
+                # distance to closest fielder for each ball
                 dist_min = np.minimum(np.minimum(dlf, dcf), drf)
-                total_penalty = -dist_min.sum()
-                if total_penalty < best_score:
-                    best_score = total_penalty
+
+                # objective: *total* distance (smaller is better)
+                total_distance = dist_min.sum()
+
+                if total_distance < best_score:
+                    best_score = total_distance
                     best = {"LF": lf, "CF": cf, "RF": rf}
+
     return best
 
 # -------------------------------------------------------

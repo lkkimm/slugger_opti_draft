@@ -1,4 +1,4 @@
-import os, io, base64, sys, logging
+import io, base64, sys, logging
 from typing import Dict, Tuple
 from flask import Flask, request, jsonify, render_template_string, send_file
 import numpy as np
@@ -7,7 +7,6 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
 from matplotlib.patches import Rectangle
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -16,43 +15,27 @@ log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # -------------------------------------------------------
-# CONFIG: batters and which side they're hitting from
-# (add more entries + file paths as you get real data)
+# CONFIG: batter options (batter name + side)
 # -------------------------------------------------------
 BATTERS: Dict[str, Dict] = {
     "dickerson_L": {
         "label": "Corey Dickerson (L)",
         "batter_name": "Corey Dickerson",
         "batter_hand": "L",
-        # for now, same file for all pitcher hands; you can split later
-        "file": "Dickerson_L.csv"
     },
     "dickerson_R": {
         "label": "Corey Dickerson (R)",
         "batter_name": "Corey Dickerson",
         "batter_hand": "R",
-        "file": "Dickerson_R.csv"
     },
-    # example Turner entries – point these to real files when you have them
-    # "turner_L": {
-    #     "label": "Trea Turner (L)",
-    #     "batter_name": "Trea Turner",
-    #     "batter_hand": "L",
-    #     "file": "Turner_L.csv"
-    # },
-    # "turner_R": {
-    #     "label": "Trea Turner (R)",
-    #     "batter_name": "Trea Turner",
-    #     "batter_hand": "R",
-    #     "file": "Turner_R.csv"
-    # },
+    # add more if you want:
+    # "turner_L": {...}, "turner_R": {...}
 }
 
-STADIUM_IMAGE = "stadium.png"  # optional background image
 LAST_CSV_PATH = "optimized_positions.csv"
 
 # -------------------------------------------------------
-# HTML UI – simple but close to final product flow
+# SIMPLE UI
 # -------------------------------------------------------
 HTML = """
 <!DOCTYPE html>
@@ -70,11 +53,12 @@ HTML = """
     select, button { width:100%; padding:0.45rem; margin-top:0.25rem; border-radius:6px; border:1px solid #444; }
     button { background:#0077ff; color:#fff; cursor:pointer; font-weight:600; border:none; }
     button:hover { background:#005fd6; }
-    #screen { flex:1; background:#000; border-radius:12px; padding:0.5rem; display:flex; justify-content:center; align-items:center; }
+    #screen { flex:1; background:#000; border-radius:12px; padding:0.5rem;
+              display:flex; flex-direction:column; justify-content:center; align-items:center; }
     img.tv { max-width:100%; border-radius:12px; }
     .caption { margin-top:0.5rem; font-size:1.1rem; text-align:center; }
     .caption span.name { color:#4aa3ff; font-weight:700; }
-    .coords { margin-top:0.5rem; font-size:0.9rem; text-align:center; }
+    .coords { margin-top:0.5rem; font-size:0.9rem; text-align:center; color:#ddd; }
   </style>
 </head>
 <body>
@@ -96,7 +80,7 @@ HTML = """
 
       <button type="button" onclick="run()">Generate Positions</button>
       <p style="margin-top:0.75rem;font-size:0.8rem;color:#bbb;">
-        Demo currently uses sample data / simulated spray charts. Trackman integration to come.
+        Demo uses synthetic spray charts per batter/handedness matchup.
       </p>
     </div>
 
@@ -139,53 +123,44 @@ async function run() {
 """
 
 # -------------------------------------------------------
-# Data loading
+# SPRAY DATA (synthetic but different for each scenario)
 # -------------------------------------------------------
-def load_batted_balls(batter_id: str, pitcher_hand: str) -> pd.DataFrame:
+def generate_spray(batter_id: str, pitcher_hand: str) -> pd.DataFrame:
     """
-    For now, we ignore pitcher_hand when picking files (demo mode).
-    Later you can have separate files per pitcher hand, e.g.
-    Dickerson_L_vs_RHP.csv vs Dickerson_L_vs_LHP.csv.
+    Generate a synthetic spray chart based on batter + pitcher handedness.
+    This guarantees we always have data and the hitters look different.
     """
-    meta = BATTERS.get(batter_id)
-    if meta is None:
-        raise ValueError(f"Unknown batter_id: {batter_id}")
+    seed = abs(hash(batter_id + "_" + pitcher_hand)) % (2**32)
+    rng = np.random.default_rng(seed)
+    n = 160
 
-    path = meta.get("file")
-    if path and os.path.exists(path):
-        if path.lower().endswith(".csv"):
-            df = pd.read_csv(path)
-        else:
-            # for .xlsm etc
-            df = pd.read_excel(path, engine="openpyxl")
+    # Slight directional bias based on batter handedness and pitcher
+    meta = BATTERS[batter_id]
+    bhand = meta["batter_hand"]
 
-        # normalize to x,y
-        df.columns = [c.lower().strip() for c in df.columns]
-        if not {"x","y"}.issubset(df.columns):
-            num = df.select_dtypes(include="number").columns.tolist()
-            if len(num) < 2:
-                raise ValueError(f"{path} has no numeric x,y columns")
-            df = df.rename(columns={num[0]:"x", num[1]:"y"})
-        df = df[["x","y"]].dropna()
-        # clip to outfield-ish region
-        df = df[(df["x"].between(40,260)) & (df["y"].between(180,420))]
-        if len(df) > 0:
-            return df.reset_index(drop=True)
+    if bhand == "L" and pitcher_hand == "RHP":
+        # pull-side to right field
+        x = rng.normal(210, 25, n)
+    elif bhand == "L" and pitcher_hand == "LHP":
+        # more opposite-field
+        x = rng.normal(140, 30, n)
+    elif bhand == "R" and pitcher_hand == "LHP":
+        x = rng.normal(90, 25, n)
+    else:  # R vs RHP
+        x = rng.normal(160, 30, n)
 
-    # Fallback: generate synthetic spray if file missing
-    rng = np.random.default_rng(0 if meta["batter_hand"]=="L" else 1)
-    n = 150
-    x = rng.uniform(50, 250, n)
-    y = rng.uniform(220, 380, n)
+    y = rng.normal(300, 35, n)
+    x = np.clip(x, 50, 250)
+    y = np.clip(y, 220, 400)
     return pd.DataFrame({"x": x, "y": y})
 
 # -------------------------------------------------------
-# Optimization
+# OPTIMIZATION (3-layer loop)
 # -------------------------------------------------------
 def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
     """
-    3-layer loop over LF, CF, RF positions using a simple distance-based
-    reward/penalty: closer to batted balls is better.
+    3-layer brute-force over LF, CF, RF.
+    Reward/penalty is based on distance from each batted ball to nearest fielder.
     """
     lf_grid = [(x,y) for x in range(70,120,10)  for y in range(260,330,10)]
     cf_grid = [(x,y) for x in range(120,180,10) for y in range(310,380,10)]
@@ -203,7 +178,6 @@ def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
             dcf = np.hypot(bx - cf[0], by - cf[1])
             for rf in rf_grid:
                 drf = np.hypot(bx - rf[0], by - rf[1])
-                # assign each ball to closest fielder; penalty = negative distance
                 dist_min = np.minimum(np.minimum(dlf, dcf), drf)
                 total_penalty = -dist_min.sum()
                 if total_penalty < best_score:
@@ -212,34 +186,35 @@ def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
     return best
 
 # -------------------------------------------------------
-# Plotting (stadium-style overlay)
+# PLOTTING (make sure players show!)
 # -------------------------------------------------------
-def make_stadium_plot(df: pd.DataFrame, positions: Dict[str, Tuple[float,float]],
-                      batter_label: str, pitcher_hand: str) -> str:
+def make_plot(df: pd.DataFrame, positions: Dict[str, Tuple[float,float]],
+              batter_label: str, pitcher_hand: str) -> str:
     fig, ax = plt.subplots(figsize=(9,5))
 
-    # background stadium image if available
-    if os.path.exists(STADIUM_IMAGE):
-        img = mpimg.imread(STADIUM_IMAGE)
-        ax.imshow(img, extent=[0,300,0,420], zorder=0)
-    else:
-        ax.set_facecolor("darkgreen")
+    # simple "stadium": green field + faint fence
+    ax.set_facecolor("#084408")
+    ax.axhline(210, color="#dddddd", linewidth=3)  # infield/fence line
 
-    ax.scatter(df["x"], df["y"], c="orange", s=25, alpha=0.6,
-               label="Batted balls", zorder=2)
+    # spray
+    ax.scatter(df["x"], df["y"], c="#ff9933", s=35, alpha=0.7,
+               edgecolor="none", label="Batted balls", zorder=2)
 
+    # outfielders as red rectangles
     for pos_name, (x,y) in positions.items():
-        rect = Rectangle((x-5, y-5), 10, 10,
+        rect = Rectangle((x-6, y-6), 12, 12,
                          linewidth=2, edgecolor="red",
-                         facecolor="none", zorder=3)
+                         facecolor="none", zorder=4)
         ax.add_patch(rect)
-        ax.text(x+6, y+6, pos_name, color="red", fontsize=10,
-                weight="bold", zorder=4)
+        ax.scatter(x, y, c="red", s=80, zorder=5)
+        ax.text(x+8, y+8, pos_name, color="red",
+                fontsize=10, weight="bold", zorder=6)
 
     ax.set_xlim(40,260)
     ax.set_ylim(200,420)
-    ax.axis("off")
-    ax.set_title(f"{batter_label} vs. {pitcher_hand}", color="white")
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title(f"{batter_label} vs. {pitcher_hand}",
+                 color="white", fontsize=14)
 
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight")
@@ -247,7 +222,7 @@ def make_stadium_plot(df: pd.DataFrame, positions: Dict[str, Tuple[float,float]]
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 # -------------------------------------------------------
-# Routes
+# ROUTES
 # -------------------------------------------------------
 @app.route("/")
 def index():
@@ -264,13 +239,13 @@ def api_compute():
             return jsonify({"ok": False, "error": "Unknown batter"}), 400
 
         meta = BATTERS[batter_id]
-        df = load_batted_balls(batter_id, pitcher_hand)
+        df = generate_spray(batter_id, pitcher_hand)
         positions = optimize_outfield(df)
 
-        # save printable CSV
+        # Save printable CSV
         pd.DataFrame.from_dict(positions, orient="index", columns=["X","Y"]).to_csv(LAST_CSV_PATH)
 
-        img_b64 = make_stadium_plot(df, positions, meta["label"], pitcher_hand)
+        img_b64 = make_plot(df, positions, meta["label"], pitcher_hand)
 
         return jsonify({
             "ok": True,

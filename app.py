@@ -194,33 +194,105 @@ def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
 # -------------------------------------------------------
 # PLOTTING (make sure players show!)
 # -------------------------------------------------------
-def make_plot(df: pd.DataFrame, positions: Dict[str, Tuple[float,float]],
-              batter_label: str, pitcher_hand: str) -> str:
-    fig, ax = plt.subplots(figsize=(9,5))
+def make_plot(df: pd.DataFrame,
+              positions: Dict[str, Tuple[float, float]],
+              batter_label: str,
+              pitcher_hand: str) -> str:
+    """
+    Draw a rough baseball field like Tony's sketch:
+    - home plate at bottom
+    - wedge-shaped outfield
+    - left/center/right zones
+    - orange spray dots
+    - red boxes for LF / CF / RF
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
 
-    # simple "stadium": green field + faint fence
-    ax.set_facecolor("#084408")
-    ax.axhline(210, color="#dddddd", linewidth=3)  # infield/fence line
+    # --- basic field geometry in our x,y coordinate system (40–260, 200–420) ---
+    home_plate = (150, 205)
+    left_foul_corner = (40, 260)
+    right_foul_corner = (260, 260)
+    left_wall = (40, 420)
+    right_wall = (260, 420)
 
-    # spray
-    ax.scatter(df["x"], df["y"], c="#ff9933", s=35, alpha=0.7,
-               edgecolor="none", label="Batted balls", zorder=2)
+    # Outfield "fan" (outfield grass)
+    outfield_poly = Polygon(
+        [left_foul_corner, left_wall, right_wall, right_foul_corner],
+        closed=True,
+        facecolor="#0b5d23",
+        edgecolor="white",
+        linewidth=2,
+        zorder=0,
+    )
+    ax.add_patch(outfield_poly)
 
-    # outfielders as red rectangles
-    for pos_name, (x,y) in positions.items():
-        rect = Rectangle((x-6, y-6), 12, 12,
-                         linewidth=2, edgecolor="red",
-                         facecolor="none", zorder=4)
+    # Infield wedge
+    infield_poly = Polygon(
+        [home_plate, left_foul_corner, right_foul_corner],
+        closed=True,
+        facecolor="#c49a6c",
+        edgecolor="white",
+        linewidth=2,
+        zorder=1,
+    )
+    ax.add_patch(infield_poly)
+
+    # Foul lines
+    ax.plot([home_plate[0], left_foul_corner[0]],
+            [home_plate[1], left_foul_corner[1]],
+            color="white", linewidth=2, zorder=2)
+    ax.plot([home_plate[0], right_foul_corner[0]],
+            [home_plate[1], right_foul_corner[1]],
+            color="white", linewidth=2, zorder=2)
+
+    # Rough center line to split LF / CF / RF visually
+    ax.plot([150, 150], [260, 420], color="#66aa66", linestyle="--", linewidth=1, zorder=2)
+
+    # --- spray chart (orange balls) ---
+    ax.scatter(
+        df["x"], df["y"],
+        c="#ff9933", s=30, alpha=0.7,
+        edgecolor="none", zorder=3
+    )
+
+    # --- red boxes for final LF / CF / RF positions ---
+    box_w, box_h = 14, 14
+    for name, (x, y) in positions.items():
+        # box
+        rect = Rectangle(
+            (x - box_w / 2.0, y - box_h / 2.0),
+            box_w, box_h,
+            linewidth=2,
+            edgecolor="red",
+            facecolor="none",
+            zorder=5
+        )
         ax.add_patch(rect)
-        ax.scatter(x, y, c="red", s=80, zorder=5)
-        ax.text(x+8, y+8, pos_name, color="red",
-                fontsize=10, weight="bold", zorder=6)
 
-    ax.set_xlim(40,260)
-    ax.set_ylim(200,420)
-    ax.set_xticks([]); ax.set_yticks([])
+        # dot inside
+        ax.scatter(x, y, c="red", s=80, zorder=6)
+
+        # label above
+        ax.text(
+            x, y + box_h,
+            name,
+            color="red",
+            fontsize=10,
+            weight="bold",
+            ha="center",
+            va="bottom",
+            zorder=7
+        )
+
+    # --- cosmetic stuff ---
+    ax.set_xlim(40, 260)
+    ax.set_ylim(200, 430)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.axis("off")
+
     ax.set_title(f"{batter_label} vs. {pitcher_hand}",
-                 color="white", fontsize=14)
+                 color="white", fontsize=14, pad=10)
 
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight")

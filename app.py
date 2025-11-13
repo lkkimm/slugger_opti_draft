@@ -3,6 +3,7 @@ from typing import Dict, Tuple
 from flask import Flask, request, jsonify, render_template_string, send_file
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Polygon, Rectangle
 
 import matplotlib
 matplotlib.use("Agg")

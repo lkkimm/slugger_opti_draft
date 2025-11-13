@@ -1,14 +1,19 @@
-import io, base64, sys, logging
+# app.py  —  Outfield Positioning Optimizer Demo (drawn field)
+
+import io
+import base64
+import sys
+import logging
 from typing import Dict, Tuple
+
 from flask import Flask, request, jsonify, render_template_string, send_file
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Polygon, Rectangle
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Polygon, Rectangle
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -16,7 +21,7 @@ log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # -------------------------------------------------------
-# CONFIG: batter options (batter name + side)
+# CONFIG: batter options (name + side)
 # -------------------------------------------------------
 BATTERS: Dict[str, Dict] = {
     "dickerson_L": {
@@ -29,14 +34,14 @@ BATTERS: Dict[str, Dict] = {
         "batter_name": "Corey Dickerson",
         "batter_hand": "R",
     },
-    # add more if you want:
+    # You can add more entries later, e.g.:
     # "turner_L": {...}, "turner_R": {...}
 }
 
 LAST_CSV_PATH = "optimized_positions.csv"
 
 # -------------------------------------------------------
-# SIMPLE UI
+# SIMPLE UI (inline HTML)
 # -------------------------------------------------------
 HTML = """
 <!DOCTYPE html>
@@ -51,7 +56,8 @@ HTML = """
     .layout { display: flex; gap: 2rem; }
     .panel { background:#1f1f1f; padding:1rem 1.25rem; border-radius:12px; width:260px; }
     label { font-size:0.9rem; font-weight:600; display:block; margin-top:0.75rem; }
-    select, button { width:100%; padding:0.45rem; margin-top:0.25rem; border-radius:6px; border:1px solid #444; }
+    select, button { width:100%; padding:0.45rem; margin-top:0.25rem;
+                     border-radius:6px; border:1px solid #444; }
     button { background:#0077ff; color:#fff; cursor:pointer; font-weight:600; border:none; }
     button:hover { background:#005fd6; }
     #screen { flex:1; background:#000; border-radius:12px; padding:0.5rem;
@@ -82,6 +88,9 @@ HTML = """
       <button type="button" onclick="run()">Generate Positions</button>
       <p style="margin-top:0.75rem;font-size:0.8rem;color:#bbb;">
         Demo uses synthetic spray charts per batter/handedness matchup.
+      </p>
+      <p style="margin-top:0.25rem;font-size:0.8rem;color:#bbb;">
+        <a href="/download" style="color:#4aa3ff;">Download latest LF/CF/RF CSV</a>
       </p>
     </div>
 
@@ -124,39 +133,39 @@ async function run() {
 """
 
 # -------------------------------------------------------
-# SPRAY DATA (synthetic but different for each scenario)
+# SPRAY GENERATION (synthetic, by batter & pitcher hand)
 # -------------------------------------------------------
 def generate_spray(batter_id: str, pitcher_hand: str) -> pd.DataFrame:
     """
-    Generate a synthetic spray chart based on batter + pitcher handedness.
-    This guarantees we always have data and the hitters look different.
+    Synthetic spray pattern that depends on batter side + pitcher hand.
+    This keeps the demo self-contained and consistent.
     """
-    seed = abs(hash(batter_id + "_" + pitcher_hand)) % (2**32)
-    rng = np.random.default_rng(seed)
-    n = 160
-
-    # Slight directional bias based on batter handedness and pitcher
     meta = BATTERS[batter_id]
     bhand = meta["batter_hand"]
 
-    if bhand == "L" and pitcher_hand == "RHP":
-        # pull-side to right field
-        x = rng.normal(210, 25, n)
-    elif bhand == "L" and pitcher_hand == "LHP":
-        # more opposite-field
-        x = rng.normal(140, 30, n)
-    elif bhand == "R" and pitcher_hand == "LHP":
-        x = rng.normal(90, 25, n)
-    else:  # R vs RHP
-        x = rng.normal(160, 30, n)
+    seed = abs(hash(batter_id + "_" + pitcher_hand)) % (2**32)
+    rng = np.random.default_rng(seed)
+    n = 180
 
-    y = rng.normal(300, 35, n)
+    # directional bias
+    if bhand == "L" and pitcher_hand == "RHP":
+        x = rng.normal(210, 25, n)  # pull to RF
+    elif bhand == "L" and pitcher_hand == "LHP":
+        x = rng.normal(150, 25, n)  # more middle
+    elif bhand == "R" and pitcher_hand == "LHP":
+        x = rng.normal(90, 25, n)   # pull to LF
+    else:  # R vs RHP
+        x = rng.normal(150, 25, n)
+
+    y = rng.normal(310, 35, n)
+
     x = np.clip(x, 50, 250)
-    y = np.clip(y, 220, 400)
+    y = np.clip(y, 230, 400)
+
     return pd.DataFrame({"x": x, "y": y})
 
 # -------------------------------------------------------
-# OPTIMIZATION (3-layer loop)
+# OPTIMIZATION (3-layer LF/CF/RF search)
 # -------------------------------------------------------
 def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
     """
@@ -170,7 +179,7 @@ def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
     bx = df["x"].to_numpy()
     by = df["y"].to_numpy()
 
-    best_score = float("inf")   # we want the *smallest* total distance
+    best_score = float("inf")
     best = {}
 
     for lf in lf_grid:
@@ -179,36 +188,28 @@ def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
             dcf = np.hypot(bx - cf[0], by - cf[1])
             for rf in rf_grid:
                 drf = np.hypot(bx - rf[0], by - rf[1])
-
-                # distance to closest fielder for each ball
                 dist_min = np.minimum(np.minimum(dlf, dcf), drf)
-
-                # objective: *total* distance (smaller is better)
                 total_distance = dist_min.sum()
-
                 if total_distance < best_score:
                     best_score = total_distance
                     best = {"LF": lf, "CF": cf, "RF": rf}
-
     return best
 
 # -------------------------------------------------------
-# PLOTTING (make sure players show!)
+# PLOTTING (drawn baseball field + color-coded spray)
 # -------------------------------------------------------
 def make_plot(df: pd.DataFrame,
               positions: Dict[str, Tuple[float, float]],
               batter_label: str,
               pitcher_hand: str) -> str:
     """
-    Broadcast-style spray chart:
-
-    - Stadium background image (like the Harper slide)
-    - Spray balls colored by outcome: 1B / 2B / 3B / OUT
-    - Tall red bars at the outfield fence for LF / CF / RF
+    Draw a simple baseball field (green outfield + brown infield wedge),
+    with:
+      - spray dots color-coded by outcome (1B / 2B / 3B / OUT)
+      - small red boxes + dots at optimized LF / CF / RF positions
     """
 
-    # ---------- outcome coloring ----------
-    # Use an existing column if present; otherwise make demo outcomes.
+    # ---------- outcome → color ----------
     outcome_col = None
     for c in df.columns:
         if c.lower() in ("result", "outcome", "event"):
@@ -216,110 +217,112 @@ def make_plot(df: pd.DataFrame,
             break
 
     if outcome_col is None:
-        # demo mode: assign pseudo-random outcomes for nice visuals
         rng = np.random.default_rng(0)
         labels = np.array(["1B", "2B", "3B", "OUT"])
-        df["result"] = rng.choice(labels, size=len(df), p=[0.45, 0.25, 0.05, 0.25])
-        outcome_col = "result"
+        df["outcome"] = rng.choice(labels, size=len(df),
+                                   p=[0.5, 0.25, 0.05, 0.20])
+        outcome_col = "outcome"
 
-    outcome_to_color = {
-        "1B": "#1e88e5",   # blue
-        "2B": "#43a047",   # green
-        "3B": "#fb8c00",   # orange
-        "OUT": "#9e9e9e"   # gray
+    color_map = {
+        "1B": "#42a5f5",   # blue
+        "2B": "#66bb6a",   # green
+        "3B": "#ffa726",   # orange
+        "OUT": "#bdbdbd"   # gray
     }
-
-    colors = df[outcome_col].map(lambda v: outcome_to_color.get(str(v).upper(), "#ffffff"))
-
-    # ---------- figure + background ----------
-    fig, ax = plt.subplots(figsize=(10, 5))
-
-    # coordinate system we’ve been using: x in [40,260], y in [200,420]
-    try:
-        img = mpimg.imread("stadium.png")  # put your Citi Field or Nats Park photo here
-        ax.imshow(img, extent=[40, 260, 200, 420], zorder=0)
-    except Exception:
-        # fallback if you don’t have the stadium.png yet
-        ax.set_facecolor("#0b5d23")
-
-    # ---------- spray balls ----------
-    ax.scatter(
-        df["x"], df["y"],
-        c=colors,
-        s=40,
-        alpha=0.75,
-        edgecolor="none",
-        zorder=2
+    spray_colors = df[outcome_col].map(
+        lambda v: color_map.get(str(v).upper(), "#ffffff")
     )
 
-    # ---------- red bars for LF / CF / RF ----------
-    fence_y = 300        # place the bar bases roughly on the warning track
-    bar_height = 90
-    bar_width = 10
+    # ---------- figure + field ----------
+    fig, ax = plt.subplots(figsize=(9, 5))
 
-    for name, (x, _y_opt) in positions.items():
-        # vertical bar at the wall
+    x_min, x_max = 40, 260
+    y_min, y_max = 200, 420
+    fence_y = 260
+
+    # Outfield (green rectangle above fence)
+    outfield = Polygon(
+        [(x_min, fence_y), (x_min, y_max), (x_max, y_max), (x_max, fence_y)],
+        closed=True,
+        facecolor="#0b5d23",
+        edgecolor="none",
+        zorder=0
+    )
+    ax.add_patch(outfield)
+
+    # Infield dirt triangle
+    home = (150, y_min)
+    left_foul = (x_min, fence_y)
+    right_foul = (x_max, fence_y)
+    infield = Polygon(
+        [home, left_foul, right_foul],
+        closed=True,
+        facecolor="#c49a6c",
+        edgecolor="white",
+        linewidth=2,
+        zorder=1
+    )
+    ax.add_patch(infield)
+
+    # Foul lines
+    ax.plot([home[0], left_foul[0]],
+            [home[1], left_foul[1]],
+            color="white", linewidth=2, zorder=2)
+    ax.plot([home[0], right_foul[0]],
+            [home[1], right_foul[1]],
+            color="white", linewidth=2, zorder=2)
+
+    # Center line
+    ax.plot([150, 150], [fence_y, y_max],
+            color="#66bb66", linestyle="--", linewidth=1.5, zorder=2)
+
+    # ---------- spray dots ----------
+    ax.scatter(
+        df["x"], df["y"],
+        c=spray_colors,
+        s=35,
+        alpha=0.8,
+        edgecolor="none",
+        zorder=3
+    )
+
+    # ---------- optimized LF / CF / RF ----------
+    box_w, box_h = 10, 10
+
+    for name, (cx, cy) in positions.items():
         rect = Rectangle(
-            (x - bar_width / 2.0, fence_y),
-            bar_width,
-            bar_height,
-            linewidth=3,
+            (cx - box_w/2, cy - box_h/2),
+            box_w,
+            box_h,
+            linewidth=2,
             edgecolor="red",
             facecolor="none",
-            zorder=3
+            zorder=4
         )
         ax.add_patch(rect)
-
-        # small red dot inside the bar (about halfway up)
-        ax.scatter(x, fence_y + bar_height * 0.55, c="red", s=90, zorder=4)
-
-        # label above bar
+        ax.scatter(cx, cy, c="red", s=70, zorder=5)
         ax.text(
-            x, fence_y + bar_height + 12,
+            cx, cy + box_h,
             name,
             color="red",
-            fontsize=11,
+            fontsize=9,
             weight="bold",
             ha="center",
             va="bottom",
-            zorder=5
+            zorder=6
         )
 
-    # ---------- legend for outcomes ----------
-    # build a fake legend using unique outcomes present
-    handled = []
-    for outcome, color in outcome_to_color.items():
-        if outcome in df[outcome_col].str.upper().unique():
-            handled.append(
-                plt.Line2D(
-                    [0], [0],
-                    marker='o', color='none',
-                    markerfacecolor=color,
-                    markersize=8,
-                    label=outcome
-                )
-            )
-    if handled:
-        ax.legend(
-            handles=handled,
-            loc="upper right",
-            frameon=True,
-            framealpha=0.8,
-            facecolor="white"
-        )
-
-    # ---------- cosmetic stuff ----------
-    ax.set_xlim(40, 260)
-    ax.set_ylim(200, 420)
-    ax.set_xticks([])
-    ax.set_yticks([])
+    # ---------- cosmetics ----------
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_xticks([]); ax.set_yticks([])
     ax.axis("off")
 
     ax.set_title(
         f"{batter_label}  vs. {pitcher_hand}",
         color="white",
         fontsize=14,
-        pad=10
+        pad=8
     )
 
     buf = io.BytesIO()
@@ -345,10 +348,11 @@ def api_compute():
             return jsonify({"ok": False, "error": "Unknown batter"}), 400
 
         meta = BATTERS[batter_id]
+
         df = generate_spray(batter_id, pitcher_hand)
         positions = optimize_outfield(df)
 
-        # Save printable CSV
+        # save printable CSV
         pd.DataFrame.from_dict(positions, orient="index", columns=["X","Y"]).to_csv(LAST_CSV_PATH)
 
         img_b64 = make_plot(df, positions, meta["label"], pitcher_hand)
@@ -369,7 +373,7 @@ def api_compute():
 
 @app.route("/download")
 def download():
-    if not os.path.exists(LAST_CSV_PATH):
+    if not pd.io.common.file_exists(LAST_CSV_PATH):
         return "Run an optimization first.", 404
     return send_file(LAST_CSV_PATH, as_attachment=True)
 

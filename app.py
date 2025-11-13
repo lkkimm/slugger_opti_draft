@@ -200,112 +200,117 @@ def make_plot(df: pd.DataFrame,
               batter_label: str,
               pitcher_hand: str) -> str:
     """
-    Draw a sketch-style baseball field:
-      - wedge-shaped field like Tony's diagram
-      - big LF / CF / RF zones (blue boxes)
-      - optimized point inside each zone (red dot)
-      - orange spray dots over the field
+    Broadcast-style spray chart:
+
+    - Stadium background image (like the Harper slide)
+    - Spray balls colored by outcome: 1B / 2B / 3B / OUT
+    - Tall red bars at the outfield fence for LF / CF / RF
     """
-    fig, ax = plt.subplots(figsize=(8, 6))
 
-    # --- Field geometry approximately matching the sketch ---
-    home = (150, 210)
-    left_foul = (50, 260)
-    right_foul = (250, 260)
+    # ---------- outcome coloring ----------
+    # Use an existing column if present; otherwise make demo outcomes.
+    outcome_col = None
+    for c in df.columns:
+        if c.lower() in ("result", "outcome", "event"):
+            outcome_col = c
+            break
 
-    # curved-ish outfield fence using a few points
-    outfield_points = [
-        left_foul,
-        (80, 360),
-        (150, 390),
-        (220, 360),
-        right_foul
-    ]
+    if outcome_col is None:
+        # demo mode: assign pseudo-random outcomes for nice visuals
+        rng = np.random.default_rng(0)
+        labels = np.array(["1B", "2B", "3B", "OUT"])
+        df["result"] = rng.choice(labels, size=len(df), p=[0.45, 0.25, 0.05, 0.25])
+        outcome_col = "result"
 
-    # outfield grass fan
-    outfield_poly = Polygon(
-        outfield_points,
-        closed=True,
-        facecolor="#0b5d23",
-        edgecolor="white",
-        linewidth=2,
-        zorder=0
-    )
-    ax.add_patch(outfield_poly)
+    outcome_to_color = {
+        "1B": "#1e88e5",   # blue
+        "2B": "#43a047",   # green
+        "3B": "#fb8c00",   # orange
+        "OUT": "#9e9e9e"   # gray
+    }
 
-    # infield dirt wedge
-    infield_poly = Polygon(
-        [home, left_foul, right_foul],
-        closed=True,
-        facecolor="#c49a6c",
-        edgecolor="white",
-        linewidth=2,
-        zorder=1
-    )
-    ax.add_patch(infield_poly)
+    colors = df[outcome_col].map(lambda v: outcome_to_color.get(str(v).upper(), "#ffffff"))
 
-    # foul lines (home to the two corners)
-    ax.plot(
-        [home[0], left_foul[0]],
-        [home[1], left_foul[1]],
-        color="white", linewidth=2, zorder=2
-    )
-    ax.plot(
-        [home[0], right_foul[0]],
-        [home[1], right_foul[1]],
-        color="white", linewidth=2, zorder=2
-    )
+    # ---------- figure + background ----------
+    fig, ax = plt.subplots(figsize=(10, 5))
 
-    # center line like Tony's green line
-    ax.plot(
-        [150, 150],
-        [260, 390],
-        color="#4caf50",
-        linestyle="--",
-        linewidth=1.5,
+    # coordinate system we’ve been using: x in [40,260], y in [200,420]
+    try:
+        img = mpimg.imread("stadium.png")  # put your Citi Field or Nats Park photo here
+        ax.imshow(img, extent=[40, 260, 200, 420], zorder=0)
+    except Exception:
+        # fallback if you don’t have the stadium.png yet
+        ax.set_facecolor("#0b5d23")
+
+    # ---------- spray balls ----------
+    ax.scatter(
+        df["x"], df["y"],
+        c=colors,
+        s=40,
+        alpha=0.75,
+        edgecolor="none",
         zorder=2
     )
 
-    # --- Spray chart (orange balls) ---
-    ax.scatter(
-        df["x"], df["y"],
-        c="#ff9933", s=30, alpha=0.7,
-        edgecolor="none", zorder=3
-    )
+    # ---------- red bars for LF / CF / RF ----------
+    fence_y = 300        # place the bar bases roughly on the warning track
+    bar_height = 90
+    bar_width = 10
 
-    # --- LF / CF / RF zones (big blue boxes) ---
-    zone_w, zone_h = 70, 80   # size of the big LF/CF/RF zone boxes
-
-    for name, (cx, cy) in positions.items():
-        # large blue box representing the zone that fielder "covers"
-        zone_rect = Rectangle(
-            (cx - zone_w / 2, cy - zone_h / 2),
-            zone_w, zone_h,
-            linewidth=2,
-            edgecolor="deepskyblue",
+    for name, (x, _y_opt) in positions.items():
+        # vertical bar at the wall
+        rect = Rectangle(
+            (x - bar_width / 2.0, fence_y),
+            bar_width,
+            bar_height,
+            linewidth=3,
+            edgecolor="red",
             facecolor="none",
-            zorder=4
+            zorder=3
         )
-        ax.add_patch(zone_rect)
+        ax.add_patch(rect)
 
-        # red dot at the optimized point inside the zone
-        ax.scatter(cx, cy, c="red", s=80, zorder=5)
+        # small red dot inside the bar (about halfway up)
+        ax.scatter(x, fence_y + bar_height * 0.55, c="red", s=90, zorder=4)
 
-        # label inside box
+        # label above bar
         ax.text(
-            cx, cy,
+            x, fence_y + bar_height + 12,
             name,
-            color="deepskyblue",
-            fontsize=10,
+            color="red",
+            fontsize=11,
             weight="bold",
             ha="center",
-            va="center",
-            zorder=6
+            va="bottom",
+            zorder=5
         )
 
-    # --- Cosmetics to match the sketch feel ---
+    # ---------- legend for outcomes ----------
+    # build a fake legend using unique outcomes present
+    handled = []
+    for outcome, color in outcome_to_color.items():
+        if outcome in df[outcome_col].str.upper().unique():
+            handled.append(
+                plt.Line2D(
+                    [0], [0],
+                    marker='o', color='none',
+                    markerfacecolor=color,
+                    markersize=8,
+                    label=outcome
+                )
+            )
+    if handled:
+        ax.legend(
+            handles=handled,
+            loc="upper right",
+            frameon=True,
+            framealpha=0.8,
+            facecolor="white"
+        )
+
+    # ---------- cosmetic stuff ----------
     ax.set_xlim(40, 260)
-    ax.set_ylim(200, 410)
+    ax.set_ylim(200, 420)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.axis("off")

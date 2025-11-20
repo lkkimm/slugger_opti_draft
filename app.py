@@ -198,15 +198,21 @@ def optimize_outfield(df: pd.DataFrame) -> Dict[str, Tuple[float,float]]:
 # -------------------------------------------------------
 # PLOTTING (drawn baseball field + color-coded spray)
 # -------------------------------------------------------
+from matplotlib.patches import Polygon, Rectangle, Circle, Arc
+
 def make_plot(df: pd.DataFrame,
               positions: Dict[str, Tuple[float, float]],
               batter_label: str,
               pitcher_hand: str) -> str:
     """
-    Draw a simple baseball field (green outfield + brown infield wedge),
-    with:
-      - spray dots color-coded by outcome (1B / 2B / 3B / OUT)
-      - small red boxes + dots at optimized LF / CF / RF positions
+    Realistic drawn baseball field:
+      - curved outfield fence
+      - infield dirt arc
+      - basepaths
+      - mound / home plate
+      - green grass
+      - spray dots color-coded by outcome
+      - optimized LF/CF/RF positions with small red boxes
     """
 
     # ---------- outcome → color ----------
@@ -220,111 +226,117 @@ def make_plot(df: pd.DataFrame,
         rng = np.random.default_rng(0)
         labels = np.array(["1B", "2B", "3B", "OUT"])
         df["outcome"] = rng.choice(labels, size=len(df),
-                                   p=[0.5, 0.25, 0.05, 0.20])
+                                   p=[0.55, 0.25, 0.03, 0.17])
         outcome_col = "outcome"
 
     color_map = {
-        "1B": "#42a5f5",   # blue
-        "2B": "#66bb6a",   # green
-        "3B": "#ffa726",   # orange
-        "OUT": "#bdbdbd"   # gray
+        "1B": "#42a5f5",
+        "2B": "#66bb6a",
+        "3B": "#ffa726",
+        "OUT": "#bdbdbd"
     }
-    spray_colors = df[outcome_col].map(
-        lambda v: color_map.get(str(v).upper(), "#ffffff")
-    )
+    spray_colors = df[outcome_col].map(lambda v: color_map.get(str(v).upper(), "white"))
 
-    # ---------- figure + field ----------
-    fig, ax = plt.subplots(figsize=(9, 5))
+    # ---------- figure settings ----------
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.set_facecolor("#144d14")   # deep green grass
 
-    x_min, x_max = 40, 260
-    y_min, y_max = 200, 420
-    fence_y = 260
+    # MLB-ish dimensions in your coordinate system
+    # scale everything into the existing df coordinate system
+    home = (150, 200)
+    left_line = (60, 250)
+    right_line = (240, 250)
 
-    # Outfield (green rectangle above fence)
-    outfield = Polygon(
-        [(x_min, fence_y), (x_min, y_max), (x_max, y_max), (x_max, fence_y)],
+    # Outfield fence arc
+    fence_radius = 180
+    fence_arc = Arc(home, width=fence_radius*2, height=fence_radius*2,
+                    theta1=22, theta2=158, edgecolor="white",
+                    linewidth=2, zorder=1)
+
+    ax.add_patch(fence_arc)
+
+    # Outfield grass fan polygon
+    fence_points = []
+    for angle in np.linspace(22, 158, 30):
+        rad = np.radians(angle)
+        px = home[0] + fence_radius * np.cos(rad)
+        py = home[1] + fence_radius * np.sin(rad)
+        fence_points.append((px, py))
+
+    outfield_poly = Polygon(
+        [left_line] + fence_points + [right_line],
         closed=True,
-        facecolor="#0b5d23",
+        facecolor="#1c6b1c",
         edgecolor="none",
         zorder=0
     )
-    ax.add_patch(outfield)
+    ax.add_patch(outfield_poly)
 
-    # Infield dirt triangle
-    home = (150, y_min)
-    left_foul = (x_min, fence_y)
-    right_foul = (x_max, fence_y)
-    infield = Polygon(
-        [home, left_foul, right_foul],
+    # Infield dirt arc
+    dirt_radius = 95
+    dirt_arc = Arc(home, width=dirt_radius*2, height=dirt_radius*2,
+                   theta1=22, theta2=158,
+                   edgecolor="#c49a6c", linewidth=25, zorder=2)
+    ax.add_patch(dirt_arc)
+
+    # Basepaths (square rotated)
+    basepath = Polygon(
+        [
+            (150, 200),       # home
+            (170, 220),       # 1B-ish
+            (150, 240),       # 2B-ish
+            (130, 220)        # 3B-ish
+        ],
         closed=True,
         facecolor="#c49a6c",
         edgecolor="white",
         linewidth=2,
-        zorder=1
-    )
-    ax.add_patch(infield)
-
-    # Foul lines
-    ax.plot([home[0], left_foul[0]],
-            [home[1], left_foul[1]],
-            color="white", linewidth=2, zorder=2)
-    ax.plot([home[0], right_foul[0]],
-            [home[1], right_foul[1]],
-            color="white", linewidth=2, zorder=2)
-
-    # Center line
-    ax.plot([150, 150], [fence_y, y_max],
-            color="#66bb66", linestyle="--", linewidth=1.5, zorder=2)
-
-    # ---------- spray dots ----------
-    ax.scatter(
-        df["x"], df["y"],
-        c=spray_colors,
-        s=35,
-        alpha=0.8,
-        edgecolor="none",
         zorder=3
     )
+    ax.add_patch(basepath)
 
-    # ---------- optimized LF / CF / RF ----------
-    box_w, box_h = 10, 10
+    # Foul lines
+    ax.plot([home[0], left_line[0]], [home[1], left_line[1]],
+            color="white", linewidth=2, zorder=4)
+    ax.plot([home[0], right_line[0]], [home[1], right_line[1]],
+            color="white", linewidth=2, zorder=4)
+
+    # Centerline (optional)
+    ax.plot([150, 150], [250, 380],
+            color="white", linestyle="--", linewidth=1.2, alpha=0.6, zorder=4)
+
+    # ---------- spray dots ----------
+    ax.scatter(df["x"], df["y"],
+               c=spray_colors, s=30, alpha=0.8,
+               edgecolor="none", zorder=5)
+
+    # ---------- LF / CF / RF red boxes ----------
+    box_w, box_h = 12, 12
 
     for name, (cx, cy) in positions.items():
-        rect = Rectangle(
-            (cx - box_w/2, cy - box_h/2),
-            box_w,
-            box_h,
-            linewidth=2,
-            edgecolor="red",
-            facecolor="none",
-            zorder=4
-        )
+        rect = Rectangle((cx - box_w/2, cy - box_h/2),
+                         box_w, box_h,
+                         linewidth=2, edgecolor="red",
+                         facecolor="none", zorder=7)
         ax.add_patch(rect)
-        ax.scatter(cx, cy, c="red", s=70, zorder=5)
-        ax.text(
-            cx, cy + box_h,
-            name,
-            color="red",
-            fontsize=9,
-            weight="bold",
-            ha="center",
-            va="bottom",
-            zorder=6
-        )
+
+        ax.scatter(cx, cy, c="red", s=70, zorder=8)
+
+        ax.text(cx, cy + box_h + 3,
+                name, color="red", fontsize=10,
+                ha="center", va="bottom",
+                weight="bold", zorder=9)
 
     # ---------- cosmetics ----------
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
+    ax.set_xlim(40, 260)
+    ax.set_ylim(200, 420)
     ax.set_xticks([]); ax.set_yticks([])
     ax.axis("off")
 
-    ax.set_title(
-        f"{batter_label}  vs. {pitcher_hand}",
-        color="white",
-        fontsize=14,
-        pad=8
-    )
+    ax.set_title(f"{batter_label} vs {pitcher_hand}",
+                 color="white", fontsize=16, pad=12)
 
+    # ---------- export ----------
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight")
     plt.close(fig)
